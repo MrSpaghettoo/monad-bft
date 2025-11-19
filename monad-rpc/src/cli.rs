@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(name = "monad-node", about, long_about = None)]
+#[command(name = "monad-rpc", about, long_about = None, version = monad_version::version!())]
 pub struct Cli {
     /// Set the mempool ipc path
     #[arg(long)]
@@ -120,13 +120,17 @@ pub struct Cli {
     #[arg(long, default_value_t = 20)]
     pub eth_trace_block_max_concurrent_requests: u32,
 
-    /// Set the number of threads used for executing block tracing methods (e.g. `debug_traceTransaction`, `debug_traceBlockByNumber`, etc.)
+    /// Set the number of threads used for trace operations (shared by block and transaction execution)
     #[arg(long, default_value_t = 1)]
     pub eth_trace_block_executor_threads: u32,
 
     /// Set the number of fibers used for executing block tracing methods (e.g. `debug_traceTransaction`, `debug_traceBlockByNumber`, etc.)
     #[arg(long, default_value_t = 2)]
     pub eth_trace_block_executor_fibers: u32,
+
+    /// Set the number of fibers used for executing transactions within trace blocks
+    #[arg(long, default_value_t = 100)]
+    pub eth_trace_tx_executor_fibers: u32,
 
     /// Set the memory limit of the node cache when executing eth_call and eth_estimateGas
     #[arg(long, default_value_t = 100 << 20)] // 100 MB

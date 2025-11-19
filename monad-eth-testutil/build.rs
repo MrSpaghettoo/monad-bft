@@ -13,8 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-pub mod bft_archive_worker;
-pub mod block_archive_worker;
-pub mod file_checkpointer;
-pub mod generic_folder_archiver;
-pub mod index_worker;
+use std::{env, path::Path};
+
+fn main() {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let repo_root = Path::new(&manifest_dir)
+        .parent()
+        .expect("no parent directory");
+
+    monad_version::auto(repo_root);
+}
