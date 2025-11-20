@@ -30,18 +30,18 @@ impl Generator for UniswapGenerator {
         let mut txs = Vec::with_capacity(self.tx_per_sender * accts.len());
 
         // for each sender, provide liquidity in uniswap pools
-        for sender in accts {
-            for _ in 0..self.tx_per_sender {
-                let tx = self.uniswap.construct_tx(
-                    sender,
-                    ctx.base_fee,
-                    ctx.chain_id,
-                    ctx.set_tx_gas_limit,
-                    ctx.priority_fee,
-                );
-                txs.push((tx, self.uniswap.addr, sender.key.clone()));
-            }
-        }
+        // for sender in accts {
+        //     for _ in 0..self.tx_per_sender {
+        //         let tx = self.uniswap.construct_tx(
+        //             sender,
+        //             ctx.base_fee,
+        //             ctx.chain_id,
+        //             ctx.set_tx_gas_limit,
+        //             ctx.priority_fee,
+        //         );
+        //         txs.push((tx, self.uniswap.addr, sender.key.clone()));
+        //     }
+        // }
 
         txs
     }

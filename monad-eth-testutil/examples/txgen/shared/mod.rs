@@ -27,6 +27,7 @@ pub mod eth_json_rpc;
 pub mod key_pool;
 pub mod private_key;
 pub mod uniswap;
+pub mod weth;
 
 async fn ensure_contract_deployed(
     client: &ReqwestClient,
