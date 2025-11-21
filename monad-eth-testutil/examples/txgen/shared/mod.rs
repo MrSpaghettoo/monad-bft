@@ -44,6 +44,16 @@ async fn ensure_contract_deployed(
 
         if let Ok(receipt) = client.get_transaction_receipt(hash).await {
             info!(receipt = ?receipt, "Contract deployment receipt");
+
+            // Check if transaction succeeded
+            if !receipt.status() {
+                return Err(eyre::eyre!(
+                    "Contract deployment transaction failed! Gas used: {}, Hash: {}",
+                    receipt.gas_used,
+                    hash
+                ));
+            }
+
             return Ok(());
         }
 

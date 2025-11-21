@@ -22,11 +22,11 @@ use alloy_primitives::{
 };
 use alloy_rlp::Encodable;
 use alloy_rpc_client::ReqwestClient;
-use alloy_rpc_types::TransactionReceipt;
+use alloy_rpc_types::{TransactionReceipt, TransactionRequest};
 use alloy_sol_macro::sol;
-use alloy_sol_types::{SolCall, SolConstructor};
+use alloy_sol_types::{SolCall, SolConstructor, SolEvent};
 use eyre::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     shared::{
@@ -41,10 +41,15 @@ const NON_FUNGIBLE_POSITION_MANAGER_BYTECODE: &str =
     include_str!("uniswap_non_fungible_position_manager_bytecode.txt");
 const INITIAL_PRICE: f64 = 300.0;
 
-#[derive(Deserialize, Debug, Clone, Copy)]
-#[serde(transparent)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct Uniswap {
-    pub addr: Address,
+    pub factory_addr: Address,
+    pub nonfungible_position_manager_addr: Address,
+    // pub swap_router_02_addr: Address,
+    pub weth_addr: Address,
+    pub token_a_addr: Address,
+    pub token_b_addr: Address,
+    pub pool_addr: Address,
 }
 
 impl Uniswap {
@@ -92,7 +97,7 @@ impl Uniswap {
         let pool_addr = Self::create_pool(
             client,
             nonce + 5,
-            &deployer.1,
+            &deployer,
             factory_addr,
             token_a_addr,
             token_b_addr,
@@ -102,48 +107,25 @@ impl Uniswap {
         .await?;
         println!("pool_addr: {}", pool_addr);
 
-        // // initialize pool
-        // let tx =
-        //     Self::initialize_pool(nonce + 4, &deployer.1, pool_addr, max_fee_per_gas, chain_id);
-        // let mut rlp_encoded_tx = Vec::new();
-        // tx.encode_2718(&mut rlp_encoded_tx);
-        // let _: String = client
-        //     .request(
-        //         "eth_sendRawTransaction",
-        //         [format!("0x{}", hex::encode(rlp_encoded_tx))],
-        // )
-        // .await?;
-
-        Ok(Self { addr: manager_addr })
-    }
-
-    // Helper function to initialize the price of the pool
-    pub fn initialize_pool(
-        nonce: u64,
-        deployer: &PrivateKey,
-        pool: Address,
-        max_fee_per_gas: u128,
-        chain_id: u64,
-    ) -> TxEnvelope {
-        let input = UniswapV3Pool::initializeCall {
-            sqrtPriceX96: calculate_sqrt_price_x96(INITIAL_PRICE),
-        }
-        .abi_encode();
-
-        let tx = TxEip1559 {
-            chain_id,
-            nonce,
-            gas_limit: 500_000,
+        // initialize pool
+        Self::initialize_pool(
+            client,
+            nonce + 6,
+            &deployer.1,
+            pool_addr,
             max_fee_per_gas,
-            max_priority_fee_per_gas: 10,
-            to: TxKind::Call(pool),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: input.into(),
-        };
+            chain_id,
+        )
+        .await?;
 
-        let sig = deployer.sign_transaction(&tx);
-        TxEnvelope::Eip1559(tx.into_signed(sig))
+        Ok(Self {
+            factory_addr,
+            nonfungible_position_manager_addr: manager_addr,
+            weth_addr,
+            token_a_addr,
+            token_b_addr,
+            pool_addr,
+        })
     }
 
     pub async fn deploy_factory_tx(
@@ -157,7 +139,7 @@ impl Uniswap {
         let tx = TxEip1559 {
             chain_id,
             nonce,
-            gas_limit: 20_000_000,
+            gas_limit: 30_000_000, // Uniswap V3 Factory needs ~25-30M gas
             max_fee_per_gas,
             max_priority_fee_per_gas: 10,
             to: TxKind::Create,
@@ -206,7 +188,7 @@ impl Uniswap {
         let tx = TxEip1559 {
             chain_id,
             nonce,
-            gas_limit: 20_000_000,
+            gas_limit: 30_000_000, // Position Manager also needs ~25-30M gas
             max_fee_per_gas,
             max_priority_fee_per_gas: 10,
             to: TxKind::Create,
@@ -225,7 +207,7 @@ impl Uniswap {
                 [format!("0x{}", hex::encode(rlp_encoded_tx))],
             )
             .await?;
-        let manager_addr = calculate_contract_addr(&deployer.0, nonce + 5);
+        let manager_addr = calculate_contract_addr(&deployer.0, nonce);
 
         ensure_contract_deployed(client, manager_addr, tx.tx_hash()).await?;
 
@@ -248,7 +230,7 @@ impl Uniswap {
                 [format!("0x{}", hex::encode(rlp_encoded_tx))],
             )
             .await?;
-        let token_a_addr = calculate_contract_addr(&deployer.0, nonce + 1);
+        let token_a_addr = calculate_contract_addr(&deployer.0, nonce);
 
         ensure_contract_deployed(client, token_a_addr, tx.tx_hash()).await?;
 
@@ -259,7 +241,7 @@ impl Uniswap {
     pub async fn create_pool(
         client: &ReqwestClient,
         nonce: u64,
-        deployer: &PrivateKey,
+        deployer: &(Address, PrivateKey),
         factory: Address,
         token_a: Address,
         token_b: Address,
@@ -269,7 +251,7 @@ impl Uniswap {
         let input = UniswapV3Factory::createPoolCall {
             tokenA: token_a,
             tokenB: token_b,
-            fee: U24::from(500), // uniswap can only take fee of 500 or 3000
+            fee: U24::from(500),
         }
         .abi_encode();
 
@@ -280,6 +262,65 @@ impl Uniswap {
             max_fee_per_gas,
             max_priority_fee_per_gas: 10,
             to: TxKind::Call(factory),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: input.into(),
+        };
+
+        let sig = deployer.1.sign_transaction(&tx);
+        let tx = TxEnvelope::Eip1559(tx.into_signed(sig));
+
+        let mut rlp_encoded_tx = Vec::new();
+        tx.encode_2718(&mut rlp_encoded_tx);
+        let tx_hash: Bytes = client
+            .request(
+                "eth_sendRawTransaction",
+                [format!("0x{}", hex::encode(rlp_encoded_tx))],
+            )
+            .await?;
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let receipt: TransactionReceipt = client
+            .request("eth_getTransactionReceipt", [tx_hash])
+            .await?;
+
+        let pool_created_log = receipt
+            .inner
+            .logs()
+            .iter()
+            .find(|log| {
+                log.topics().first() == Some(&UniswapV3Factory::PoolCreated::SIGNATURE_HASH)
+            })
+            .ok_or_else(|| eyre::eyre!("No pool created log found in receipt"))?;
+
+        let event = UniswapV3Factory::PoolCreated::decode_log(&pool_created_log.inner, true)?;
+        let pool_address = event.pool;
+
+        Ok(pool_address)
+    }
+
+    // Helper function to initialize the price of the pool
+    pub async fn initialize_pool(
+        client: &ReqwestClient,
+        nonce: u64,
+        deployer: &PrivateKey,
+        pool: Address,
+        max_fee_per_gas: u128,
+        chain_id: u64,
+    ) -> Result<()> {
+        let input = UniswapV3Pool::initializeCall {
+            sqrtPriceX96: calculate_sqrt_price_x96(INITIAL_PRICE),
+        }
+        .abi_encode();
+
+        let tx = TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit: 500_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(pool),
             value: U256::ZERO,
             access_list: Default::default(),
             input: input.into(),
@@ -296,20 +337,66 @@ impl Uniswap {
                 [format!("0x{}", hex::encode(rlp_encoded_tx))],
             )
             .await?;
+
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
         let receipt: TransactionReceipt = client
             .request("eth_getTransactionReceipt", [tx_hash])
             .await?;
-        let receipt_log = receipt
+
+        if !receipt.inner.status() {
+            return Err(eyre::eyre!("Pool initialization transaction reverted"));
+        }
+
+        receipt
             .inner
             .logs()
-            .first()
-            .ok_or_else(|| eyre::eyre!("No logs found in receipt"))?;
-        // pool address is emitted as the last element in the event
-        let log_data = &receipt_log.data().data;
-        let pool_address = Address::from_slice(&log_data[log_data.len() - 20..]);
+            .iter()
+            .find(|log| log.topics().first() == Some(&UniswapV3Pool::Initialize::SIGNATURE_HASH))
+            .inspect(|_| println!("Pool initialized successfully!"))
+            .ok_or_else(|| eyre::eyre!("No initialize event found in receipt"))?;
 
-        Ok(pool_address)
+        Ok(())
+    }
+
+    pub async fn get_pool_address(
+        client: &ReqwestClient,
+        factory: Address,
+        token_a: Address,
+        token_b: Address,
+    ) -> Result<Address> {
+        // Verify pool creation by calling getPool()
+        let get_pool_input = UniswapV3Factory::getPoolCall {
+            tokenA: token_a,
+            tokenB: token_b,
+            fee: U24::from(500),
+        }
+        .abi_encode();
+
+        let call_request = TransactionRequest::default()
+            .to(factory)
+            .input(get_pool_input.into());
+
+        let pool_bytes: Bytes = client.request("eth_call", (call_request, "latest")).await?;
+
+        let pool_return = UniswapV3Factory::getPoolCall::abi_decode_returns(&pool_bytes, true)
+            .map_err(|e| eyre::eyre!("Failed to decode getPool() return: {}", e))?;
+
+        Ok(pool_return._0)
+    }
+
+    pub async fn get_owner(client: &ReqwestClient, factory: Address) -> Result<Address> {
+        let get_owner_input = UniswapV3Factory::ownerCall {}.abi_encode();
+        let call_request = TransactionRequest::default()
+            .to(factory)
+            .input(get_owner_input.into());
+
+        let owner_bytes: Bytes = client.request("eth_call", (call_request, "latest")).await?;
+
+        let owner_return = UniswapV3Factory::ownerCall::abi_decode_returns(&owner_bytes, true)
+            .map_err(|e| eyre::eyre!("Failed to decode owner() return: {}", e))?;
+
+        Ok(owner_return._0)
     }
 
     // Helper function to construct a Uniswap transaction
@@ -357,35 +444,76 @@ impl Uniswap {
 // Contract interface
 sol! {
     contract UniswapV3Factory {
+        event PoolCreated(
+            address indexed token0,
+            address indexed token1,
+            uint24 indexed fee,
+            int24 tickSpacing,
+            address pool
+        );
+
         function createPool(address tokenA, address tokenB, uint24 fee) external;
+        function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
+        function owner() external view returns (address);
     }
 }
 
 sol! {
     contract UniswapV3Pool {
+        event Initialize(uint160 sqrtPriceX96, int24 tick);
+
         function initialize(uint160 sqrtPriceX96) external;
     }
 }
 
 sol! {
     contract NonfungiblePositionManager {
+        struct MintParams {
+            address token0;
+            address token1;
+            uint24 fee;
+            int24 tickLower;
+            int24 tickUpper;
+            uint256 amount0Desired;
+            uint256 amount1Desired;
+            uint256 amount0Min;
+            uint256 amount1Min;
+            address recipient;
+            uint256 deadline;
+        }
+
         constructor(
             address factory,
             address weth9,
             address tokenDescriptor
         );
-        function swap(
-            bool zeroForOne,
-            uint256 amountSpecified,
-            uint160 sqrtPriceLimitX96,
-            bytes calldata data
-        ) external;
-        function mint(
+        function mint(MintParams calldata params)
+        external
+        payable
+        returns (
+            uint256 tokenId,
+            uint128 liquidity,
+            uint256 amount0,
+            uint256 amount1
+        );
+
+        function positions(uint256 tokenId)
+        external
+        view
+        returns (
+            uint96 nonce,
+            address operator,
+            address token0,
+            address token1,
+            uint24 fee,
             int24 tickLower,
             int24 tickUpper,
-            uint128 amount,
-            bytes calldata data
-        ) external;
+            uint128 liquidity,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        );
     }
 }
 
