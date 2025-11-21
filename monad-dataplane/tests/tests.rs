@@ -579,23 +579,64 @@ fn broadcast_all_strides() {
     let tx_socket = tx.take_udp_socket_handle(LEGACY_SOCKET).unwrap();
 
     for stride in MINIMUM_SEGMENT_SIZE..=DEFAULT_SEGMENT_SIZE {
-        tx_socket.write_broadcast(BroadcastMsg {
-            targets: vec![rx_addr],
-            payload: payload.clone().into(),
-            stride,
-        });
-
-        let stride = stride.into();
-
-        let num_msgs = total_length.div_ceil(stride);
+        let stride_usize = stride as usize;
+        let data_size = stride_usize - 4;
+        let num_msgs = total_length.div_ceil(data_size);
 
         for i in 0..num_msgs {
-            let msg: RecvUdpMsg = executor::block_on(rx_socket.recv());
+            let mut msg_payload = Vec::with_capacity(stride_usize);
+            msg_payload.extend_from_slice(&(i as u32).to_le_bytes());
+            let start = i * data_size;
+            let end = ((i + 1) * data_size).min(payload.len());
+            msg_payload.extend_from_slice(&payload[start..end]);
 
+            tx_socket.write_broadcast(BroadcastMsg {
+                targets: vec![rx_addr],
+                payload: msg_payload.into(),
+                stride,
+            });
+        }
+
+        let mut received_msgs = Vec::new();
+        for _ in 0..num_msgs {
+            let msg: RecvUdpMsg = executor::block_on(rx_socket.recv());
             assert_eq!(msg.src_addr, tx_addr);
+            received_msgs.push(msg);
+        }
+
+        received_msgs.sort_by_key(|msg| {
+            u32::from_le_bytes([
+                msg.payload[0],
+                msg.payload[1],
+                msg.payload[2],
+                msg.payload[3],
+            ])
+        });
+
+        for (i, msg) in received_msgs.iter().enumerate() {
+            let seq = u32::from_le_bytes([
+                msg.payload[0],
+                msg.payload[1],
+                msg.payload[2],
+                msg.payload[3],
+            ]);
             assert_eq!(
-                &msg.payload[..],
-                &payload[i * stride..((i + 1) * stride).min(payload.len())]
+                seq,
+                i as u32,
+                "stride={} expected_seq={} got_seq={} payload_len={}",
+                stride,
+                i,
+                seq,
+                msg.payload.len()
+            );
+            let start = i * data_size;
+            let end = ((i + 1) * data_size).min(payload.len());
+            assert_eq!(
+                &msg.payload[4..],
+                &payload[start..end],
+                "stride={} seq={}",
+                stride,
+                seq
             );
         }
     }
@@ -636,22 +677,63 @@ fn unicast_all_strides() {
     let tx_socket = tx.take_udp_socket_handle(LEGACY_SOCKET).unwrap();
 
     for stride in MINIMUM_SEGMENT_SIZE..=DEFAULT_SEGMENT_SIZE {
-        tx_socket.write_unicast(UnicastMsg {
-            msgs: vec![(rx_addr, payload.clone().into())],
-            stride,
-        });
-
-        let stride = stride.into();
-
-        let num_msgs = total_length.div_ceil(stride);
+        let stride_usize = stride as usize;
+        let data_size = stride_usize - 4;
+        let num_msgs = total_length.div_ceil(data_size);
 
         for i in 0..num_msgs {
-            let msg: RecvUdpMsg = executor::block_on(rx_socket.recv());
+            let mut msg_payload = Vec::with_capacity(stride_usize);
+            msg_payload.extend_from_slice(&(i as u32).to_le_bytes());
+            let start = i * data_size;
+            let end = ((i + 1) * data_size).min(payload.len());
+            msg_payload.extend_from_slice(&payload[start..end]);
 
+            tx_socket.write_unicast(UnicastMsg {
+                msgs: vec![(rx_addr, msg_payload.into())],
+                stride,
+            });
+        }
+
+        let mut received_msgs = Vec::new();
+        for _ in 0..num_msgs {
+            let msg: RecvUdpMsg = executor::block_on(rx_socket.recv());
             assert_eq!(msg.src_addr, tx_addr);
+            received_msgs.push(msg);
+        }
+
+        received_msgs.sort_by_key(|msg| {
+            u32::from_le_bytes([
+                msg.payload[0],
+                msg.payload[1],
+                msg.payload[2],
+                msg.payload[3],
+            ])
+        });
+
+        for (i, msg) in received_msgs.iter().enumerate() {
+            let seq = u32::from_le_bytes([
+                msg.payload[0],
+                msg.payload[1],
+                msg.payload[2],
+                msg.payload[3],
+            ]);
             assert_eq!(
-                &msg.payload[..],
-                &payload[i * stride..((i + 1) * stride).min(payload.len())]
+                seq,
+                i as u32,
+                "stride={} expected_seq={} got_seq={} payload_len={}",
+                stride,
+                i,
+                seq,
+                msg.payload.len()
+            );
+            let start = i * data_size;
+            let end = ((i + 1) * data_size).min(payload.len());
+            assert_eq!(
+                &msg.payload[4..],
+                &payload[start..end],
+                "stride={} seq={}",
+                stride,
+                seq
             );
         }
     }

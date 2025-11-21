@@ -54,6 +54,7 @@ pub struct DataplaneBuilder {
     tcp_config: TcpConfig,
     ban_duration: Duration,
     udp_sockets: Vec<UdpSocketConfig>,
+    socket_readers: usize,
 }
 
 impl DataplaneBuilder {
@@ -71,8 +72,9 @@ impl DataplaneBuilder {
                 connections_limit: 10000,
                 per_ip_connections_limit: 100,
             },
-            ban_duration: Duration::from_secs(5 * 60), // 5 minutes
+            ban_duration: Duration::from_secs(5 * 60),
             udp_sockets: vec![],
+            socket_readers: 128,
         }
     }
 
@@ -104,6 +106,12 @@ impl DataplaneBuilder {
         self
     }
 
+    pub fn with_socket_readers(mut self, count: usize) -> Self {
+        assert!(count > 0, "socket_readers must be greater than 0");
+        self.socket_readers = count;
+        self
+    }
+
     pub fn build(self) -> Dataplane {
         let DataplaneBuilder {
             local_addr,
@@ -113,6 +121,7 @@ impl DataplaneBuilder {
             tcp_config,
             ban_duration,
             udp_sockets,
+            socket_readers,
         } = self;
 
         let mut seen_labels = std::collections::HashSet::new();
@@ -183,6 +192,7 @@ impl DataplaneBuilder {
                                 udp_egress_rx,
                                 up_bandwidth_mbps,
                                 udp_buffer_size,
+                                socket_readers,
                             );
 
                             ready_clone.store(true, Ordering::Release);
