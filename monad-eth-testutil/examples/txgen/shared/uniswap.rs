@@ -118,6 +118,18 @@ impl Uniswap {
         )
         .await?;
 
+        Self::approve_tokens_to_manager(
+            client,
+            nonce + 7,
+            &deployer,
+            manager_addr,
+            token_a_addr,
+            token_b_addr,
+            max_fee_per_gas,
+            chain_id,
+        )
+        .await?;
+
         Ok(Self {
             factory_addr,
             nonfungible_position_manager_addr: manager_addr,
@@ -188,7 +200,7 @@ impl Uniswap {
         let tx = TxEip1559 {
             chain_id,
             nonce,
-            gas_limit: 30_000_000, // Position Manager also needs ~25-30M gas
+            gas_limit: 30_000_000,
             max_fee_per_gas,
             max_priority_fee_per_gas: 10,
             to: TxKind::Create,
@@ -300,7 +312,6 @@ impl Uniswap {
         Ok(pool_address)
     }
 
-    // Helper function to initialize the price of the pool
     pub async fn initialize_pool(
         client: &ReqwestClient,
         nonce: u64,
@@ -359,6 +370,132 @@ impl Uniswap {
         Ok(())
     }
 
+    pub async fn approve_tokens_to_manager(
+        client: &ReqwestClient,
+        nonce: u64,
+        deployer: &(Address, PrivateKey),
+        nonfungible_position_manager_addr: Address,
+        token_0_addr: Address,
+        token_1_addr: Address,
+        max_fee_per_gas: u128,
+        chain_id: u64,
+    ) -> Result<()> {
+        // approve token 0
+        let tx = ERC20::construct_approve(
+            &ERC20 { addr: token_0_addr },
+            &deployer.1,
+            nonfungible_position_manager_addr,
+            nonce,
+            U256::MAX,
+            max_fee_per_gas,
+            chain_id,
+            Option::Some(500_000),
+            Option::Some(10),
+        );
+        let mut rlp_encoded_tx = Vec::new();
+        tx.encode_2718(&mut rlp_encoded_tx);
+        let tx_hash: Bytes = client
+            .request(
+                "eth_sendRawTransaction",
+                [format!("0x{}", hex::encode(rlp_encoded_tx))],
+            )
+            .await?;
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let receipt: TransactionReceipt = client
+            .request("eth_getTransactionReceipt", [tx_hash])
+            .await?;
+
+        println!("Token 0 approval transaction receipt: {:?}", receipt);
+
+        // approve token 1
+        // let tx = ERC20::construct_approve(
+        //     &ERC20 { addr: token_1_addr },
+        //     &deployer.1,
+        //     nonfungible_position_manager_addr,
+        //     nonce + 1,
+        //     U256::MAX,
+        //     max_fee_per_gas,
+        //     chain_id,
+        //     Option::Some(500_000),
+        //     Option::Some(10),
+        // );
+        // let mut rlp_encoded_tx = Vec::new();
+        // tx.encode_2718(&mut rlp_encoded_tx);
+        // client
+        //     .request(
+        //         "eth_sendRawTransaction",
+        //         [format!("0x{}", hex::encode(rlp_encoded_tx))],
+        //     )
+        //     .await?;
+
+        Ok(())
+    }
+
+    pub async fn add_liquidity(
+        client: &ReqwestClient,
+        nonce: u64,
+        deployer: &(Address, PrivateKey),
+        nonfungible_position_manager_addr: Address,
+        token_0_addr: Address,
+        token_1_addr: Address,
+        fee: U24,
+        max_fee_per_gas: u128,
+        chain_id: u64,
+    ) -> Result<()> {
+        // price point of 300.0 has a tick value of 57000
+        // with tick spacing of 60, lower tick is 10 ticks below current tick
+        // upper tick is 10 ticks above current tick
+        let input = NonfungiblePositionManager::mintCall {
+            params: NonfungiblePositionManager::MintParams {
+                token0: token_0_addr,
+                token1: token_1_addr,
+                fee: fee,
+                tickLower: I24::from_raw(U24::from(56400)),
+                tickUpper: I24::from_raw(U24::from(57600)),
+                amount0Desired: U256::from(100_000_000_000_000_000_000u128),
+                amount1Desired: U256::from(100_000_000_000_000_000_000u128),
+                amount0Min: U256::from(100_000_000_000_000_000_000u128),
+                amount1Min: U256::from(100_000_000_000_000_000_000u128),
+                recipient: deployer.0,
+                deadline: U256::from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + 3600,
+                ),
+            },
+        }
+        .abi_encode();
+        let tx = TxEip1559 {
+            chain_id,
+            nonce: nonce,
+            gas_limit: 500_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(nonfungible_position_manager_addr),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: input.into(),
+        };
+
+        let sig = deployer.1.sign_transaction(&tx);
+        let tx = TxEnvelope::Eip1559(tx.into_signed(sig));
+
+        let mut rlp_encoded_tx = Vec::new();
+        tx.encode_2718(&mut rlp_encoded_tx);
+        let tx_hash: Bytes = client
+            .request(
+                "eth_sendRawTransaction",
+                [format!("0x{}", hex::encode(rlp_encoded_tx))],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn get_pool_address(
         client: &ReqwestClient,
         factory: Address,
@@ -398,47 +535,6 @@ impl Uniswap {
 
         Ok(owner_return._0)
     }
-
-    // Helper function to construct a Uniswap transaction
-    // pub fn construct_tx(
-    //     &self,
-    //     sender: &mut SimpleAccount,
-    //     max_fee_per_gas: u128,
-    //     chain_id: u64,
-    //     gas_limit: Option<u64>,
-    //     priority_fee: Option<u128>,
-    // ) -> TxEnvelope {
-    //     // price point of 300.0 has a tick value of 57000
-    //     // with tick spacing of 60, lower tick is 10 ticks below current tick
-    //     // upper tick is 10 ticks above current tick
-    //     let input = UniswapV3Manager::mintCall {
-    //         tickLower: I24::from_raw(U24::from(56400)),
-    //         tickUpper: I24::from_raw(U24::from(57600)),
-    //         amount: 100_000_000_000_000_000_000,
-    //         data: Bytes::default(),
-    //     }
-    //     .abi_encode();
-    //     let tx = TxEip1559 {
-    //         chain_id,
-    //         nonce: sender.nonce,
-    //         gas_limit: gas_limit.unwrap_or(400_000), // 400k default, override with --set-tx-gas-limit
-    //         max_fee_per_gas,
-    //         max_priority_fee_per_gas: priority_fee.unwrap_or(0), // 0 default, override with --priority-fee
-    //         to: TxKind::Call(self.addr),
-    //         value: U256::ZERO,
-    //         access_list: Default::default(),
-    //         input: input.into(),
-    //     };
-
-    //     let sig = sender.key.sign_transaction(&tx);
-    //     sender.nonce += 1;
-    //     sender.native_bal = sender
-    //         .native_bal
-    //         .checked_sub(U256::from(400_000 * max_fee_per_gas))
-    //         .unwrap_or(U256::ZERO);
-
-    //     TxEnvelope::Eip1559(tx.into_signed(sig))
-    // }
 }
 
 // Contract interface
