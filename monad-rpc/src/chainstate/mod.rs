@@ -15,7 +15,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{atomic::AtomicU32, Arc},
 };
 
 use alloy_consensus::{Header as RlpHeader, Transaction as _};
@@ -26,7 +26,7 @@ use alloy_rpc_types::{
     TransactionReceipt,
 };
 use futures::{stream, StreamExt, TryStreamExt};
-use itertools::{Either, Itertools};
+use itertools::Either;
 use monad_archive::{
     model::BlockDataReader,
     prelude::{ArchiveReader, Context, ContextCompat, IndexReader, TxEnvelopeWithSender},
@@ -565,6 +565,7 @@ impl<T: Triedb> ChainState<T> {
     pub async fn get_logs(
         &self,
         filter: Filter,
+        max_response_size: u32,
         max_block_range: u64,
         use_eth_get_logs_index: bool,
         dry_run_get_logs_index: bool,
@@ -743,35 +744,65 @@ impl<T: Triedb> ChainState<T> {
             })
             .buffered(100);
 
-        let data = stream_with_archive.try_collect::<Vec<_>>().await?;
+        let heuristic_response_size = AtomicU32::from(max_response_size);
 
-        let logs = data
-            .into_iter()
-            .map(|(header, transactions, receipts)| {
-                block_receipts(transactions, receipts, &header.header, header.hash)
+        let logs = stream_with_archive
+            .flat_map(|result| {
+                result
+                    .and_then(|(header, transactions, receipts)| {
+                        block_receipts(transactions, receipts, &header.header, header.hash)
+                    })
+                    .map(|receipts| {
+                        futures::stream::iter(
+                            receipts.into_iter().map(Result::Ok).collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap_or_else(|err| futures::stream::iter(vec![Err(err)]))
             })
-            .flatten_ok()
-            .map_ok(|receipt| {
-                let logs = match receipt.inner {
-                    alloy_consensus::ReceiptEnvelope::Legacy(receipt_with_bloom)
-                    | alloy_consensus::ReceiptEnvelope::Eip2930(receipt_with_bloom)
-                    | alloy_consensus::ReceiptEnvelope::Eip1559(receipt_with_bloom)
-                    | alloy_consensus::ReceiptEnvelope::Eip4844(receipt_with_bloom)
-                    | alloy_consensus::ReceiptEnvelope::Eip7702(receipt_with_bloom) => {
-                        receipt_with_bloom.receipt.logs
-                    }
-                    _ => unreachable!(),
-                };
+            .flat_map(|result| {
+                result
+                    .and_then(|receipt| {
+                        let logs = match receipt.inner {
+                            alloy_consensus::ReceiptEnvelope::Legacy(receipt_with_bloom)
+                            | alloy_consensus::ReceiptEnvelope::Eip2930(receipt_with_bloom)
+                            | alloy_consensus::ReceiptEnvelope::Eip1559(receipt_with_bloom)
+                            | alloy_consensus::ReceiptEnvelope::Eip4844(receipt_with_bloom)
+                            | alloy_consensus::ReceiptEnvelope::Eip7702(receipt_with_bloom) => {
+                                receipt_with_bloom.receipt.logs
+                            }
+                            _ => unreachable!(),
+                        };
 
-                logs.into_iter().filter(|log: &Log| {
-                    !(filtered_params.filter.is_some()
-                        && (!filtered_params.filter_address(&log.address())
-                            || !filtered_params.filter_topics(log.topics())))
-                })
+                        let logs = logs
+                            .into_iter()
+                            .filter(|log: &Log| {
+                                !(filtered_params.filter.is_some()
+                                    && (!filtered_params.filter_address(&log.address())
+                                        || !filtered_params.filter_topics(log.topics())))
+                            })
+                            .map(|log| {
+                                let heuristic_log_len = compute_heuristic_log_len(&log);
+
+                                let last_heuristic_response_size = heuristic_response_size
+                                    .fetch_add(
+                                        heuristic_log_len as u32,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                    );
+
+                                if last_heuristic_response_size <= max_response_size {
+                                    Ok(Ok(MonadLog(log)))
+                                } else {
+                                    Err(JsonRpcError::max_size_exceeded())
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        Ok(futures::stream::iter(logs))
+                    })
+                    .unwrap_or_else(|err| futures::stream::iter(vec![Err(err)]))
             })
-            .flatten_ok()
-            .map_ok(MonadLog)
-            .collect::<Result<Vec<_>, _>>()?;
+            .try_collect::<Vec<_>>()
+            .await?;
 
         if dry_run_get_logs_index {
             if let Some(archive_reader) = self.archive_reader.clone() {
@@ -1105,6 +1136,22 @@ async fn get_receipt_from_triedb<T: Triedb>(
     }
 }
 
+const HEURISTIC_SMALLEST_LOG_RESPONSE: &str = r#"{"logIndex":"0x0","removed":false,"blockNumber":"0x0","blockHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x0","address":"0x0000000000000000000000000000000000000000","data":"0x0","topics": []}"#;
+
+fn compute_heuristic_log_len(log: &Log) -> usize {
+    HEURISTIC_SMALLEST_LOG_RESPONSE.len()
+        + log.data().data.len()
+        + (log.inner.data.topics().len()
+            * (
+                // enclosing double quotes
+                2
+                // 0x
+                + 2
+                // 32 bytes hex encoded -> 64 bytes
+                + 64
+            ))
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_eips::BlockNumberOrTag;
@@ -1239,7 +1286,7 @@ mod tests {
             ..Default::default()
         };
         let logs = chain_state
-            .get_logs(filter, 1, false, false, 1)
+            .get_logs(filter, u32::MAX, 1, false, false, 1)
             .await
             .unwrap();
         assert!(!logs.is_empty());
@@ -1249,7 +1296,7 @@ mod tests {
             ..Default::default()
         };
         let logs = chain_state
-            .get_logs(filter, 1, false, false, 1)
+            .get_logs(filter, u32::MAX, 1, false, false, 1)
             .await
             .unwrap();
         assert!(!logs.is_empty());
