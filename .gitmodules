@@ -1,3 +1,0 @@
-[submodule "monad-cxx/monad-execution"]
-	path = monad-cxx/monad-execution
-	url = git@github.com:MrSpaghettoo/monad.git
