@@ -23,6 +23,7 @@ fn main() {
         let target = "monad_execution";
         let dst = cmake::Config::new("monad-execution")
             .define("BUILD_SHARED_LIBS", "ON")
+            .define("CMAKE_POLICY_VERSION_MINIMUM", "3.5")
             .build_target(target)
             .build();
 
